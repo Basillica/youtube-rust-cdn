@@ -55,13 +55,23 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
-            .route("/cache/{key}", web::get().to(handler::get_cache))
-            .route("/cache/{key}", web::post().to(handler::insert_cache))
-            .route("/cache/insert", web::post().to(handler::insert_new_cache))
+            .route(
+                "/cache/{app_id}/{node_id}/{key}",
+                web::get().to(handler::get_cache),
+            )
+            .route("/cache/insert", web::post().to(handler::insert_cache))
+            .route(
+                "/cache/insert/new",
+                web::post().to(handler::insert_new_cache),
+            )
             // basic invalidation
             .route(
-                "/invalidate/{key}",
+                "/invalidate/{app_id}/{node_id}/{key}",
                 web::delete().to(handler::invalidate_cache),
+            )
+            .route(
+                "/cache/{app_id}/{node_id}/{key}",
+                web::get().to(handler::get_cache),
             )
     })
     .bind("127.0.0.1:8080")?
