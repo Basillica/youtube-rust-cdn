@@ -1,9 +1,18 @@
-use moka::future::Cache;
+use crate::pkg::cache::CacheManager;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct AppState {
-    pub cache: Arc<Cache<String, String>>,
-    pub invalidation_tx: mpsc::Sender<String>,
+    pub cache_manager: Arc<CacheManager>,
+    pub notifier: broadcast::Sender<String>,
+}
+
+impl AppState {
+    pub fn new(cache_manager: Arc<CacheManager>, notifier: broadcast::Sender<String>) -> Self {
+        Self {
+            cache_manager,
+            notifier,
+        }
+    }
 }

@@ -1,11 +1,8 @@
 use actix_web::{web, App, HttpServer};
-use moka::future::Cache;
-use pkg::{cache, config, state};
+use pkg::{cache, cdn, config, handler, state};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio::task;
-use tokio::time::sleep;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -27,57 +24,44 @@ async fn main() -> std::io::Result<()> {
         Err(e) => error!("Failed to load config: {:?}", e),
     }
 
-    let cache = Arc::new(
-        Cache::builder()
-            .max_capacity(10_000) // Store up to 10,000 items
-            .time_to_live(Duration::from_secs(60)) // Global TTL of 60s
-            // Time to idle (TTI):  5 minutes
-            .time_to_idle(Duration::from_secs(5 * 60))
-            .build(),
-    );
-    let (tx, mut rx) = mpsc::channel::<String>(100);
+    let cache_manager = Arc::new(cache::CacheManager::new());
+    let (tx, _) = broadcast::channel::<String>(100);
 
-    let state = state::AppState {
-        cache: cache.clone(),
-        invalidation_tx: tx.clone(),
-    };
-
-    // Distributed invalidation listener
-    let cache_clone = cache.clone();
+    let cache_manager_clone = cache_manager.clone();
     task::spawn(async move {
-        while let Some(key) = rx.recv().await {
-            cache_clone.invalidate(&key).await;
-            println!("[Distributed] Invalidated key: {}", key);
-        }
+        cache_manager_clone.run_listener().await;
     });
 
-    // Test case simulation
-    let cache_clone = cache.clone();
-    task::spawn(async move {
-        sleep(Duration::from_secs(2)).await;
-        cache_clone
-            .insert("test".to_string(), "Hello, Moka!".to_string())
-            .await;
-        println!("[Test] Inserted 'test' key");
+    let n1 = tx.subscribe();
+    let n2 = tx.subscribe();
+    let node1 = Arc::new(cdn::Node::new(
+        "node-1".into(),
+        "127.0.0.1:8081".into(),
+        1,
+        n1,
+    ));
+    let node2 = Arc::new(cdn::Node::new(
+        "node-2".into(),
+        "127.0.0.1:8082".into(),
+        2,
+        n2,
+    ));
 
-        sleep(Duration::from_secs(3)).await;
-        let value = cache_clone.get("test").await;
-        println!("[Test] Retrieved 'test': {:?}", value);
+    cache_manager.register_node("app-1", node1).await;
+    cache_manager.register_node("app-1", node2).await;
 
-        sleep(Duration::from_secs(60)).await; // Let TTL expire
-        let value = cache_clone.get("test").await;
-        println!("[Test] Retrieved after expiry: {:?}", value);
-    });
+    let app_state = web::Data::new(state::AppState::new(cache_manager.clone(), tx.clone()));
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(state.clone()))
-            .app_data(web::Data::new(tx.clone()))
-            .route("/cache/{key}", web::get().to(cache::get_cache))
-            .route("/cache/{key}", web::post().to(cache::insert_cache))
+            .app_data(app_state.clone())
+            .route("/cache/{key}", web::get().to(handler::get_cache))
+            .route("/cache/{key}", web::post().to(handler::insert_cache))
+            .route("/cache/insert", web::post().to(handler::insert_new_cache))
+            // basic invalidation
             .route(
                 "/invalidate/{key}",
-                web::delete().to(cache::invalidate_cache),
+                web::delete().to(handler::invalidate_cache),
             )
     })
     .bind("127.0.0.1:8080")?
