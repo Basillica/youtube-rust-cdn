@@ -13,3 +13,13 @@ dashmap = "5"
 moka = { version = "0.12", features = ["future"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rand = "0.9.0"
+reqwest = "0.12.12"
+
+# forwarding
+awc = "3.5.1"
+url = "2.5.4"
+futures-util = "0.3.31"
+
+[workspace]
+members = ["server1", "server2", "server3"]

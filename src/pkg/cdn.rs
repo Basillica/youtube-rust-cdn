@@ -1,15 +1,17 @@
 use moka::future::Cache;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 
 #[derive(Debug)]
 pub struct Node {
-    pub id: String,                            // Unique identifier for the node
-    pub cache: Arc<Cache<String, String>>,     // Cache associated with the node
-    pub receiver: broadcast::Receiver<String>, // Receiver to listen for invalidation events
-    pub address: String,                       // Address of the node
-    pub weight: u32,                           // Weight for load balancing
+    pub id: String,                        // Unique identifier for the node
+    pub cache: Arc<Cache<String, String>>, // Cache associated with the node
+    pub receiver: broadcast::Receiver<(String, String, String)>, // Receiver to listen for invalidation events
+    pub address: String,                                         // Address of the node
+    pub weight: usize,                                           // Weight for load balancing
+    pub is_healthy: Arc<AtomicBool>,                             // Health status of the node
 }
 
 impl Node {
@@ -17,8 +19,8 @@ impl Node {
     pub fn new(
         id: String,
         address: String,
-        weight: u32,
-        receiver: broadcast::Receiver<String>,
+        weight: usize,
+        receiver: broadcast::Receiver<(String, String, String)>,
     ) -> Self {
         let cache = Cache::builder()
             .max_capacity(10_000) // Store up to 10,000 items
@@ -32,11 +34,29 @@ impl Node {
             receiver,
             address,
             weight,
+            is_healthy: Arc::new(AtomicBool::new(true)),
         }
     }
 
     // Simulate cache invalidation for this node
     pub async fn invalidate_cache(&self, key: &str) {
         self.cache.invalidate(key).await;
+    }
+
+    pub async fn check_health(&self) -> bool {
+        return true;
+    }
+
+    pub async fn process_request(&self, request_body: String) -> Result<String, String> {
+        // Example: Read from cache or insert new data
+        let response = if let Some(value) = self.cache.get(&request_body).await {
+            format!("Cache hit: {}", value)
+        } else {
+            self.cache
+                .insert(request_body.clone(), "GeneratedResponse".to_string())
+                .await;
+            format!("Cache miss: GeneratedResponse")
+        };
+        Ok(response)
     }
 }

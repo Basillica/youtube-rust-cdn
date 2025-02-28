@@ -25,7 +25,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     let cache_manager = Arc::new(cache::CacheManager::new());
-    let (tx, _) = broadcast::channel::<String>(100);
+    let (tx, _) = broadcast::channel::<(String, String, String)>(100);
 
     let cache_manager_clone = cache_manager.clone();
     task::spawn(async move {
@@ -34,21 +34,29 @@ async fn main() -> std::io::Result<()> {
 
     let n1 = tx.subscribe();
     let n2 = tx.subscribe();
+    let n3 = tx.subscribe();
     let node1 = Arc::new(cdn::Node::new(
-        "node-1".into(),
+        "node1".into(),
         "127.0.0.1:8081".into(),
         1,
         n1,
     ));
     let node2 = Arc::new(cdn::Node::new(
-        "node-2".into(),
+        "node2".into(),
         "127.0.0.1:8082".into(),
         2,
         n2,
     ));
+    let node3 = Arc::new(cdn::Node::new(
+        "node3".into(),
+        "127.0.0.1:8083".into(),
+        2,
+        n3,
+    ));
 
-    cache_manager.register_node("app-1", node1).await;
-    cache_manager.register_node("app-1", node2).await;
+    cache_manager.register_node("app1", node1).await;
+    cache_manager.register_node("app1", node2).await;
+    cache_manager.register_node("app1", node3).await;
 
     let app_state = web::Data::new(state::AppState::new(cache_manager.clone(), tx.clone()));
 
@@ -73,6 +81,8 @@ async fn main() -> std::io::Result<()> {
                 "/cache/{app_id}/{node_id}/{key}",
                 web::get().to(handler::get_cache),
             )
+            .route("/{app_id}", web::route().to(handler::forward_request))
+        // .default_service(web::route().to(handler::forward_request))
     })
     .bind("127.0.0.1:8080")?
     .run()

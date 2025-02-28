@@ -1,17 +1,21 @@
 use super::{cdn, state::AppState};
-use actix_web::{web, HttpResponse, Responder};
-use moka::future::Cache;
+use crate::pkg::cdn::Node;
+use actix_web::{post, web, Error, HttpRequest, HttpResponse, Responder};
+use awc::{Client, ClientRequest};
+use futures_util::StreamExt;
+// use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tracing::info;
+use url::Url;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeP {
     pub id: String,      // Unique identifier for the node
     pub app_id: String,  // Unique identifier for
     pub address: String, // Address of the node
-    pub weight: u32,     // Weight for load balancing
+    pub weight: usize,   // Weight for load balancing
     pub key: String,     //
     pub value: String,   // Value
 }
@@ -123,26 +127,70 @@ pub async fn invalidate_cache(
     let nodes = val.get(&app_id);
     if let Some(nodes) = nodes {
         if nodes.iter().any(|node| node.id == node_id) {
-            let _ = state
-                .notifier
-                .send(format!("{}:{}:{}", app_id, node_id, key));
+            let _ = state.notifier.send((app_id, node_id, key.clone()));
+
             return HttpResponse::Ok().body(format!("Invalidation request sent for key: {}", key));
         }
     }
-
     HttpResponse::BadRequest().body("Invalid app_id or node_id")
 }
 
-pub async fn start_invalidation_listener(
-    mut rx: broadcast::Receiver<String>,
-    cache: Arc<Cache<String, String>>,
-) {
-    while let Ok(key) = rx.recv().await {
-        cache.invalidate(&key).await;
-        println!("[Node] Invalidated key: {}", key);
-    }
+#[post("/process")]
+pub async fn process_request(req_body: String, node: web::Data<Node>) -> impl Responder {
+    let response = if let Some(value) = node.cache.get(&req_body).await {
+        format!("Cache hit: {}", value)
+    } else {
+        node.cache
+            .insert(req_body.clone(), "GeneratedResponse".to_string())
+            .await;
+        format!("Cache miss: GeneratedResponse")
+    };
+
+    HttpResponse::Ok().body(response)
 }
 
+pub async fn forward_request(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    app_id: web::Path<String>,
+    payload: web::Payload,
+) -> Result<HttpResponse, Error> {
+    let client = Client::default();
+    let nodes: Option<Vec<Arc<Node>>> = state.cache_manager.get_nodes_for_app("app1").await;
+
+    if let Some(node) = state.cache_manager.get_best_node(&app_id, nodes).await {
+        let node_url = format!("http://{}/app/index.html", node.address);
+        info!("the process uri is: {}", node_url);
+        let mut client_req: ClientRequest = client.request(req.method().clone(), node_url.as_str());
+        // Forward headers
+        for (key, value) in req.headers().iter() {
+            client_req = client_req.append_header((key.clone(), value.clone()));
+        }
+
+        let mut client_resp = client_req.send_stream(payload).await.unwrap();
+        let mut response = HttpResponse::build(client_resp.status());
+
+        // Forward response headers
+        for (key, value) in client_resp.headers().iter() {
+            response.insert_header((key.clone(), value.clone()));
+        }
+
+        let mut body = web::BytesMut::new();
+        while let Some(chunk) = client_resp.next().await {
+            body.extend_from_slice(&chunk?);
+        }
+
+        return Ok(response.body(body));
+    }
+
+    Ok(
+        HttpResponse::ServiceUnavailable()
+            .body(format!("No available nodes for app id {}", app_id)),
+    )
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 mod test {
     use super::*;
     use crate::cache::CacheManager;
@@ -184,7 +232,7 @@ mod test {
 
     #[tokio::test]
     async fn test_cache_invalidation_with_mock_server() {
-        let (tx, mut rx) = broadcast::channel::<String>(100);
+        let (tx, mut rx) = broadcast::channel::<(String, String, String)>(100);
         let cache_manager = Arc::new(CacheManager::new());
         let app_state = web::Data::new(AppState::new(cache_manager.clone(), tx.clone()));
 
@@ -266,7 +314,14 @@ mod test {
 
         // Simulate receiving invalidation notification via the channel
         tokio::spawn(async move {
-            assert_eq!(rx.recv().await.unwrap(), "test_key".to_string());
+            assert_eq!(
+                rx.recv().await.unwrap(),
+                (
+                    "soemboringappid".to_string(),
+                    "someboringid".to_string(),
+                    "someotherkey".to_string()
+                )
+            );
         });
 
         // Verify that the cache is now invalidated (cache miss)
@@ -279,7 +334,7 @@ mod test {
 
     #[tokio::test]
     async fn test_cache_invalidation_with_multiple_listeners() {
-        let (tx, rx) = broadcast::channel::<String>(100);
+        let (tx, rx) = broadcast::channel::<(String, String, String)>(100);
         let cache_manager = Arc::new(CacheManager::new());
         let app_state = web::Data::new(AppState::new(cache_manager.clone(), tx.clone()));
 
@@ -351,10 +406,16 @@ mod test {
         assert_eq!(response.status(), 404); // Should return "Cache miss"
     }
 
-    async fn distributed_listener(mut rx: broadcast::Receiver<String>, node_id: String) {
+    async fn distributed_listener(
+        mut rx: broadcast::Receiver<(String, String, String)>,
+        node_id: String,
+    ) {
         loop {
-            let key = rx.recv().await.unwrap();
-            println!("[Node {}] Invalidated key: {}", node_id, key)
+            let (app_id, node_id, key) = rx.recv().await.unwrap();
+            println!(
+                "[AppID] {app_id} [Node {}] Invalidated key: {}",
+                node_id, key
+            )
         }
     }
 
